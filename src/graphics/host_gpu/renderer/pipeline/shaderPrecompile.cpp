@@ -2,11 +2,16 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <fstream>
+#include <mutex>
+#include <span>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <xxhash.h>
 
@@ -102,8 +107,8 @@ void AppendRecord(std::vector<uint8_t>& out, uint32_t kind, const std::vector<ui
 }
 
 std::vector<uint8_t> BuildHeader(const std::vector<uint8_t>& identity) {
-	std::vector<uint8_t> header(ShaderJournal::FileMagic,
-	                            ShaderJournal::FileMagic + sizeof(ShaderJournal::FileMagic));
+	const auto* magic = reinterpret_cast<const uint8_t*>(ShaderJournal::FileMagic);
+	std::vector<uint8_t> header(magic, magic + sizeof(ShaderJournal::FileMagic));
 	Put<uint32_t>(header, ShaderJournal::FormatVersion);
 	PutBytes(header, identity);
 	Put<uint64_t>(header, XXH3_64bits(header.data(), header.size()));
@@ -526,11 +531,15 @@ void ShaderPrecompiler::Worker(uint32_t index) {
 		if (next >= m_total) break;
 		const auto& entry = entries[next];
 		Outcome     outcome = Outcome::Failed;
+#if defined(__EXCEPTIONS) || defined(_CPPUNWIND) || defined(__cpp_exceptions)
 		try {
 			outcome = m_compile(sources[entry.source], entry);
 		} catch (const std::exception&) {
 			outcome = Outcome::Failed;
 		}
+#else
+		outcome = m_compile(sources[entry.source], entry);
+#endif
 		NoteDone(outcome);
 	}
 	if (m_workers_running.fetch_sub(1, std::memory_order_acq_rel) == 1) {

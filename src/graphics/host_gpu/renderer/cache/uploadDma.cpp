@@ -12,6 +12,7 @@
 #include <cinttypes>
 #include <cstdlib>
 #include <cstring>
+#include <span>
 
 namespace Libs::Graphics {
 

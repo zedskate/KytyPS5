@@ -36,7 +36,8 @@ std::filesystem::path TestPath(const char* name) {
 }
 
 std::vector<uint8_t> Identity(const char* text) {
-	return std::vector<uint8_t>(text, text + std::char_traits<char>::length(text));
+	const auto* bytes = reinterpret_cast<const uint8_t*>(text);
+	return std::vector<uint8_t>(bytes, bytes + std::char_traits<char>::length(text));
 }
 
 ShaderJournal::Settings MakeSettings(const std::filesystem::path& path, const char* identity = "device A") {
@@ -73,8 +74,14 @@ void Remove(const std::filesystem::path& path) {
 }
 
 std::vector<uint8_t> ReadAll(const std::filesystem::path& path) {
-	std::ifstream in(path, std::ios::binary);
-	return std::vector<uint8_t>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	std::ifstream in(path, std::ios::binary | std::ios::ate);
+	if (!in) return {};
+	const auto size = in.tellg();
+	if (size <= 0) return {};
+	std::vector<uint8_t> buffer(static_cast<size_t>(size));
+	in.seekg(0);
+	in.read(reinterpret_cast<char*>(buffer.data()), size);
+	return buffer;
 }
 
 void WriteAll(const std::filesystem::path& path, const std::vector<uint8_t>& bytes) {

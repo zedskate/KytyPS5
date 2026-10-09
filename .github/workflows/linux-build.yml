@@ -156,7 +156,7 @@ jobs:
             cmake --build _Build/linux --target "$target" --verbose > build_verbose.log 2>&1 || true
             cat build_verbose.log
             echo "--- ANNOTATING LOG ---"
-            tail -n 80 build_verbose.log | while IFS= read -r line; do
+            grep -E "(error:|fatal error:|FAILED:)" build_verbose.log | head -n 10 | while IFS= read -r line; do
               if [[ -n "$line" ]]; then
                 echo "::error title=Build Failure::$line"
               fi

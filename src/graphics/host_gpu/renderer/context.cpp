@@ -21,6 +21,7 @@
 #include <bit>
 #include <cstdlib>
 #include <cstring>
+#include <span>
 
 #if defined(_MSC_VER)
 #include <intrin.h>
