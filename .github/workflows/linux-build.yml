@@ -1,0 +1,251 @@
+name: KytyPS5 Linux Build & Release
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'u59-linux-*'
+      - 'linux-*'
+      - 'v*'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      build_launcher:
+        description: 'Build Qt6 Launcher GUI (uncheck for headless CLI emulator only)'
+        type: boolean
+        default: true
+      enable_ipo:
+        description: 'Enable Interprocedural Optimization (IPO/LTO)'
+        type: boolean
+        default: false
+      run_tests:
+        description: 'Run CTest regression test suite'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  metadata:
+    name: Prepare build metadata
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.release_tag.outputs.value }}
+    steps:
+      - name: Generate release tag
+        id: release_tag
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+            echo "value=KytyPS5-Linux-$(date -u +'%Y-%m-%d')-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
+  linux-build:
+    name: Build KytyPS5 (Linux x86-64)
+    needs: metadata
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies & Qt6
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes \
+            clang \
+            lld \
+            ninja-build \
+            cmake \
+            git \
+            glslang-tools \
+            pkg-config \
+            qt6-base-dev \
+            qt6-base-dev-tools \
+            libicu-dev \
+            libgl1-mesa-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxext-dev \
+            libxfixes-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libxss-dev \
+            libxtst-dev \
+            libxkbcommon-dev \
+            libasound2-dev \
+            libpulse-dev \
+            libudev-dev \
+            libdbus-1-dev \
+            libwayland-dev \
+            wayland-protocols \
+            zip
+
+      - name: Setup sccache compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.11
+        continue-on-error: true
+
+      - name: Verify toolchain
+        shell: bash
+        run: |
+          git --version
+          cmake --version
+          ninja --version
+          clang++ --version
+          ld.lld --version
+          glslangValidator --version
+          qmake6 -version || true
+
+      - name: Configure CMake
+        shell: bash
+        run: |
+          mkdir -p _Build
+          BUILD_LAUNCHER="ON"
+          if [[ "${{ github.event.inputs.build_launcher }}" == "false" ]]; then
+            BUILD_LAUNCHER="OFF"
+          fi
+
+          ENABLE_IPO="OFF"
+          if [[ "${{ github.event.inputs.enable_ipo }}" == "true" ]]; then
+            ENABLE_IPO="ON"
+          fi
+
+          ORIGIN="Fork"
+          if [[ "${{ github.repository }}" == "KytyPS5/KytyPS5" && "${{ github.event_name }}" == "push" ]]; then
+            ORIGIN="Official"
+          fi
+
+          CMAKE_ARGS=(
+            -S .
+            -B _Build/linux
+            -G Ninja
+            -DCMAKE_BUILD_TYPE=Release
+            -DKYTY_EMULATOR_IPO="$ENABLE_IPO"
+            -DKYTY_BUILD_LAUNCHER="$BUILD_LAUNCHER"
+            -DKYTY_BUILD_ORIGIN="$ORIGIN"
+            -DKYTY_BUILD_REPOSITORY="${{ github.repository }}"
+            -DKYTY_RELEASE_TAG="${{ needs.metadata.outputs.release_tag }}"
+            -DCMAKE_C_COMPILER=clang
+            -DCMAKE_CXX_COMPILER=clang++
+          )
+
+          cmake "${CMAKE_ARGS[@]}" 2>&1 | tee _Build/configure.log
+          exit "${PIPESTATUS[0]}"
+
+      - name: Build KytyPS5
+        shell: bash
+        run: |
+          target="launcher"
+          if [[ "${{ github.event.inputs.build_launcher }}" == "false" ]]; then
+            target="kyty_emulator"
+          fi
+
+          if ! cmake --build _Build/linux --parallel --target "$target"; then
+            echo "::error::Parallel build failed! Running verbose single-thread build to print failure log..."
+            cmake --build _Build/linux --target "$target" --verbose > build_verbose.log 2>&1 || true
+            cat build_verbose.log
+            echo "--- ANNOTATING LOG ---"
+            tail -n 80 build_verbose.log | while IFS= read -r line; do
+              if [[ -n "$line" ]]; then
+                echo "::error title=Build Failure::$line"
+              fi
+            done
+            exit 1
+          fi
+
+      - name: Run regression tests (optional)
+        if: ${{ github.event.inputs.run_tests == 'true' }}
+        shell: bash
+        continue-on-error: true
+        run: |
+          cmake --build _Build/linux --parallel --target page_manager_tests memory_tracker_tests audio_out2_port_tests || true
+          ctest --test-dir _Build/linux --output-on-failure -R '^(page_manager|memory_tracker)$' || true
+
+      - name: Install to staging directory
+        shell: bash
+        run: |
+          cmake --install _Build/linux --prefix _Build/linux/install
+
+      - name: Copy runtime presets and documentation
+        shell: bash
+        run: |
+          install_dir="_Build/linux/install"
+          if [[ -f tools/u59-preset.json ]]; then
+            cp tools/u59-preset.json "$install_dir/"
+          fi
+          if [[ -f docs/LINUX-U59.md ]]; then
+            cp docs/LINUX-U59.md "$install_dir/LINUX-README.md"
+          fi
+          if [[ -f docs/EXPERIMENTAL.md ]]; then
+            cp docs/EXPERIMENTAL.md "$install_dir/U59-README.md"
+          fi
+          cp LICENSE "$install_dir/"
+
+      - name: Verify installed binaries
+        shell: bash
+        run: |
+          install_dir="_Build/linux/install"
+          test -f "$install_dir/kyty_emulator"
+          chmod a+x "$install_dir/kyty_emulator"
+          file "$install_dir/kyty_emulator"
+          file "$install_dir/kyty_emulator" | grep -q "ELF 64-bit LSB .*x86-64"
+
+          if [[ -f "$install_dir/launcher" ]]; then
+            chmod a+x "$install_dir/launcher"
+            file "$install_dir/launcher"
+          fi
+
+          "$install_dir/kyty_emulator" --help > /dev/null || true
+          echo "Binary verification successful."
+
+      - name: Package Linux release archive
+        shell: bash
+        run: |
+          install_dir="_Build/linux/install"
+          release_name="${{ needs.metadata.outputs.release_tag }}"
+          tar -C "$install_dir" -czf "$GITHUB_WORKSPACE/$release_name-Linux-x86_64.tar.gz" .
+          (
+            cd "$install_dir"
+            zip -qry "$GITHUB_WORKSPACE/$release_name-Linux-x86_64.zip" .
+          )
+          echo "Built archives:"
+          ls -la "$GITHUB_WORKSPACE"/*.tar.gz "$GITHUB_WORKSPACE"/*.zip
+
+      - name: Upload Linux artifact (tar.gz)
+        uses: actions/upload-artifact@v4
+        with:
+          name: KytyPS5-Linux-x86_64
+          path: _Build/linux/install/**
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release_name="${{ needs.metadata.outputs.release_tag }}"
+          assets=(
+            "$GITHUB_WORKSPACE/$release_name-Linux-x86_64.tar.gz"
+            "$GITHUB_WORKSPACE/$release_name-Linux-x86_64.zip"
+          )
+          if gh release view "$release_name" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$release_name" "${assets[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$release_name" "${assets[@]}" \
+              --generate-notes \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$release_name (Linux x86-64)"
+          fi
